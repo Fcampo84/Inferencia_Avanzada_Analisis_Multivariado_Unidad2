@@ -1,0 +1,240 @@
+---
+title: "Modelado de estructuras latentes: análisis factorial aplicado a los intereses de jóvenes"
+author: "Ana Milena Uribe; Alejandro Quintero; Francisco Mario Campo; Pablo Stevens Casilimas"
+institute: "POLITÉCNICO GRAN COLOMBIANO"
+date: "Octubre de 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+lang: es
+---
+
+```{r configuracion, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, warning=FALSE, message=FALSE, fig.align="center")
+message("FLUJO AFE/AFC AUTOMATICO")
+set.seed(2026)
+paquetes <- c("tidyverse","psych","GPArotation","lavaan","semTools","knitr","kableExtra","jsonlite")
+faltantes <- paquetes[!vapply(paquetes,requireNamespace,logical(1),quietly=TRUE)]
+if(length(faltantes)) stop("Faltan paquetes: ",paste(faltantes,collapse=", "))
+invisible(lapply(paquetes,library,character.only=TRUE))
+dir.create("resultados",showWarnings=FALSE,recursive=TRUE)
+```
+
+# Resumen metodológico
+
+Se aplica una partición previa e independiente de la muestra: una submuestra para descubrir y depurar la estructura mediante AFE y otra para contrastarla mediante AFC. Los ítems se tratan como ordinales. Se comparan soluciones de 4, 6 y 8 factores, incluida la sugerencia de 8 factores del análisis paralelo policórico. La sintaxis confirmatoria se genera automáticamente desde cada solución AFE, evitando reutilizar una estructura manual anterior.
+
+# Datos y preparación
+
+```{r datos}
+archivos <- c("datos/responses.csv","datos/columns.csv")
+if(!all(file.exists(archivos))) stop("Faltan archivos: ",paste(archivos[!file.exists(archivos)],collapse=", "))
+respuestas <- read.csv(archivos[1],check.names=FALSE)
+diccionario <- read.csv(archivos[2],check.names=FALSE)
+ini <- match("History",names(respuestas)); fin <- match("Pets",names(respuestas))
+if(is.na(ini)||is.na(fin)) stop("No se localizaron History y Pets.")
+items_originales <- names(respuestas)[ini:fin]
+if(length(items_originales)!=32L) stop("Se esperaban 32 ítems y se hallaron ",length(items_originales),".")
+X0 <- respuestas[,items_originales,drop=FALSE]
+flujo <- tibble(etapa=c("Registros originales","Con al menos un faltante","Casos completos"),
+                n=c(nrow(X0),sum(!complete.cases(X0)),sum(complete.cases(X0))))
+write.csv(flujo,"resultados/00_flujo_muestra.csv",row.names=FALSE)
+X <- X0[complete.cases(X0),,drop=FALSE]
+names(X) <- make.names(names(X),unique=TRUE)
+X <- X |> mutate(across(everything(),~ordered(.x)))
+knitr::kable(flujo)
+```
+
+```{r descriptivos}
+Xnum <- as.data.frame(lapply(X,as.numeric))
+d <- psych::describe(Xnum)
+q1 <- vapply(Xnum,function(z) unname(quantile(z,.25,na.rm=TRUE)),numeric(1))
+q3 <- vapply(Xnum,function(z) unname(quantile(z,.75,na.rm=TRUE)),numeric(1))
+desc <- data.frame(variable=names(Xnum),n=d$n,media=d$mean,de=d$sd,
+                   mediana=vapply(Xnum,median,numeric(1),na.rm=TRUE),
+                   Q1=q1,Q3=q3,RIQ=q3-q1,asimetria=d$skew,curtosis=d$kurtosis,
+                   faltantes_originales=colSums(is.na(X0)),row.names=NULL)
+stopifnot(nrow(desc)==32L)
+write.csv(desc,"resultados/01_descriptivos_total.csv",row.names=FALSE)
+knitr::kable(desc,digits=2)
+```
+
+# Partición independiente
+
+```{r particion}
+set.seed(2026)
+idx <- sample(seq_len(nrow(X))); n_afe <- floor(nrow(X)/2)
+X_afe <- X[idx[seq_len(n_afe)],,drop=FALSE]
+X_afc <- X[idx[(n_afe+1):length(idx)],,drop=FALSE]
+write.csv(data.frame(indice=idx[seq_len(n_afe)]),"resultados/muestra_afe_indices.csv",row.names=FALSE)
+write.csv(data.frame(indice=idx[(n_afe+1):length(idx)]),"resultados/muestra_afc_indices.csv",row.names=FALSE)
+jsonlite::write_json(list(semilla=2026,n_total=nrow(X),n_afe=nrow(X_afe),n_afc=nrow(X_afc)),
+                     "resultados/protocolo_validacion.json",pretty=TRUE,auto_unbox=TRUE)
+```
+
+# Factibilidad y análisis paralelo
+
+```{r factibilidad}
+rho_afe <- psych::polychoric(X_afe)$rho
+dimnames(rho_afe) <- list(names(X_afe),names(X_afe))
+kmo <- psych::KMO(rho_afe); bart <- psych::cortest.bartlett(rho_afe,n=nrow(X_afe))
+fact <- data.frame(KMO=kmo$MSA,Bartlett_chi2=bart$chisq,gl=bart$df,p=bart$p.value)
+msa <- data.frame(variable=names(X_afe),MSA=as.numeric(kmo$MSAi))
+stopifnot(nrow(msa)==32L)
+write.csv(fact,"resultados/04_kmo_bartlett_afe.csv",row.names=FALSE)
+write.csv(msa,"resultados/05_kmo_por_item_afe.csv",row.names=FALSE)
+knitr::kable(fact,digits=3)
+set.seed(2026)
+psych::fa.parallel(rho_afe,n.obs=nrow(X_afe),fa="fa",fm="minres",n.iter=500,
+                   main="Análisis paralelo policórico")
+```
+
+# AFE iterativo para 4, 6 y 8 factores
+
+```{r funciones-afe}
+evaluar_afe <- function(R,k,nobs){
+  mod <- psych::fa(R,nfactors=k,n.obs=nobs,fm="minres",rotate="oblimin")
+  L <- as.data.frame(unclass(mod$loadings)); absL <- abs(as.matrix(L))
+  ord <- t(apply(absL,1,sort,decreasing=TRUE))
+  diag <- tibble(variable=rownames(L),factor=apply(absL,1,which.max),
+                 carga_principal=ord[,1],carga_secundaria=ord[,2],
+                 diferencia=ord[,1]-ord[,2],comunalidad=mod$communality,
+                 cumple=carga_principal>=.40 & carga_secundaria<.35 &
+                        diferencia>=.20 & comunalidad>=.25)
+  list(modelo=mod,cargas=L,diagnostico=diag)
+}
+
+depurar_iterativo <- function(datos,k){
+  actuales <- names(datos); bitacora <- list(); minimo_total <- 2L*k
+  max_iter <- length(actuales)-minimo_total; z <- NULL
+  for(i in seq_len(max_iter+1L)){
+    R <- psych::polychoric(datos[,actuales,drop=FALSE])$rho
+    dimnames(R) <- list(actuales,actuales)
+    z <- evaluar_afe(R,k,nrow(datos)); malos <- z$diagnostico |> filter(!cumple)
+    if(!nrow(malos)) break
+    if(length(actuales)<=minimo_total || i>max_iter) break
+    candidato <- malos |>
+      mutate(severidad=pmax(0,.40-carga_principal)+pmax(0,carga_secundaria-.35)+
+                        pmax(0,.20-diferencia)+pmax(0,.25-comunalidad)) |>
+      arrange(desc(severidad),carga_principal,comunalidad) |> slice(1)
+    bitacora[[length(bitacora)+1L]] <- candidato |> mutate(iteracion=i,decision="Eliminar",solucion=k)
+    n_antes <- length(actuales)
+    actuales <- setdiff(actuales,as.character(candidato$variable))
+    if(length(actuales)!=n_antes-1L) stop("No se retiró el ítem ",candidato$variable)
+  }
+  asignacion <- z$diagnostico |> count(factor,name="n_indicadores")
+  list(k=k,items=actuales,resultado=z,bitacora=bind_rows(bitacora),
+       converge=all(z$diagnostico$cumple),incumplimientos=sum(!z$diagnostico$cumple),
+       minimo_factor=min(asignacion$n_indicadores),tam_factores=asignacion)
+}
+```
+
+```{r ejecutar-afe}
+soluciones <- lapply(c(4,6,8),function(k) depurar_iterativo(X_afe,k))
+names(soluciones) <- paste0("F",c(4,6,8))
+for(s in soluciones){
+  write.csv(s$resultado$cargas,sprintf("resultados/cargas_AFE_%s_factores.csv",s$k))
+  write.csv(s$resultado$diagnostico,sprintf("resultados/diagnostico_AFE_%s_factores.csv",s$k),row.names=FALSE)
+}
+bitacora <- bind_rows(lapply(soluciones,`[[`,"bitacora"))
+write.csv(bitacora,"resultados/12_bitacora_depuracion.csv",row.names=FALSE)
+comparacion_afe <- bind_rows(lapply(soluciones,function(s)tibble(
+  factores=s$k,items=length(s$items),varianza=sum(s$resultado$modelo$Vaccounted[2,]),
+  incumplimientos=s$incumplimientos,converge=s$converge,minimo_indicadores=s$minimo_factor,
+  elegible_afc=s$converge && s$minimo_factor>=2)))
+write.csv(comparacion_afe,"resultados/15_comparacion_AFE_4_6_8.csv",row.names=FALSE)
+knitr::kable(comparacion_afe,digits=3)
+```
+
+# Generación automática y evaluación de modelos AFC
+
+```{r funciones-afc}
+crear_sintaxis <- function(sol){
+  d <- sol$resultado$diagnostico |> arrange(factor,desc(carga_principal))
+  grupos <- split(d$variable,d$factor)
+  lineas <- character()
+  for(i in seq_along(grupos)){
+    its <- grupos[[i]]
+    if(length(its)<2L) return(NA_character_)
+    rhs <- if(length(its)==2L) paste0("l",i,"*",its,collapse=" + ") else paste(its,collapse=" + ")
+    lineas <- c(lineas,paste0("F",i," =~ ",rhs))
+  }
+  paste(lineas,collapse="\n")
+}
+
+ajustar_candidato <- function(sol,datos){
+  sintaxis <- crear_sintaxis(sol)
+  if(is.na(sintaxis)) return(list(ok=FALSE,motivo="Factor con menos de 2 indicadores"))
+  items <- sol$items
+  ajuste <- tryCatch(lavaan::cfa(sintaxis,data=datos,ordered=items,estimator="WLSMV",std.lv=TRUE),
+                     error=function(e)e)
+  if(inherits(ajuste,"error")) return(list(ok=FALSE,motivo=conditionMessage(ajuste),sintaxis=sintaxis))
+  if(!lavInspect(ajuste,"converged")) return(list(ok=FALSE,motivo="No convergió",sintaxis=sintaxis))
+  std <- standardizedSolution(ajuste); cargas <- std |> filter(op=="=~")
+  theta <- diag(lavInspect(ajuste,"theta"))
+  impropio <- any(theta<0) || any(abs(cargas$est.std)>1) || any(cargas$est.std^2>1)
+  idxn <- c("chisq.scaled","df.scaled","pvalue.scaled","cfi.robust","tli.robust",
+            "rmsea.robust","rmsea.ci.lower.robust","rmsea.ci.upper.robust","srmr")
+  fm <- fitMeasures(ajuste,idxn)
+  score <- unname(fm["cfi.robust"]+fm["tli.robust"]-fm["rmsea.robust"]-fm["srmr"])
+  list(ok=TRUE,admisible=!impropio,ajuste=ajuste,sintaxis=sintaxis,cargas=cargas,
+       indices=fm,score=score,motivo=if(impropio)"Solución impropia" else "Admisible")
+}
+```
+
+```{r ejecutar-afc}
+modelos_afc <- lapply(soluciones,function(s) ajustar_candidato(s,X_afc))
+resumen_afc <- bind_rows(Map(function(nombre,obj){
+  if(!isTRUE(obj$ok)) return(tibble(modelo=nombre,ejecutado=FALSE,admisible=FALSE,motivo=obj$motivo))
+  tibble(modelo=nombre,ejecutado=TRUE,admisible=obj$admisible,motivo=obj$motivo,
+         chisq=unname(obj$indices["chisq.scaled"]),gl=unname(obj$indices["df.scaled"]),
+         CFI=unname(obj$indices["cfi.robust"]),TLI=unname(obj$indices["tli.robust"]),
+         RMSEA=unname(obj$indices["rmsea.robust"]),SRMR=unname(obj$indices["srmr"]),score=obj$score)
+},names(modelos_afc),modelos_afc))
+write.csv(resumen_afc,"resultados/20_comparacion_AFC_4_6_8.csv",row.names=FALSE)
+knitr::kable(resumen_afc,digits=3)
+
+admisibles <- resumen_afc |> filter(ejecutado,admisible)
+if(!nrow(admisibles)) stop("Ninguno de los modelos AFC fue admisible. No se generan conclusiones finales.")
+mejor_nombre <- admisibles |> arrange(desc(score),desc(CFI),RMSEA) |> slice(1) |> pull(modelo)
+modelo_final <- modelos_afc[[mejor_nombre]]
+solucion_final <- soluciones[[mejor_nombre]]
+writeLines(modelo_final$sintaxis,"resultados/21_sintaxis_modelo_final.txt")
+write.csv(modelo_final$cargas,"resultados/22_cargas_modelo_final.csv",row.names=FALSE)
+jsonlite::write_json(list(modelo_final=mejor_nombre,criterio="Mayor score entre modelos admisibles",
+                          score=modelo_final$score),"resultados/23_decision_modelo_final.json",pretty=TRUE,auto_unbox=TRUE)
+```
+
+# Fiabilidad y validez del modelo final admisible
+
+```{r calidad-final}
+ajuste_final <- modelo_final$ajuste
+cr <- semTools::compRelSEM(ajuste_final); ave <- semTools::AVE(ajuste_final)
+calidad <- data.frame(factor=names(cr),CR=as.numeric(cr),AVE=as.numeric(ave[names(cr)]))
+write.csv(calidad,"resultados/31_CR_AVE_modelo_final.csv",row.names=FALSE)
+htmt <- semTools::htmt(modelo_final$sintaxis,data=X_afc,ordered=solucion_final$items)
+write.csv(as.data.frame(htmt),"resultados/33_HTMT_modelo_final.csv")
+knitr::kable(calidad,digits=3)
+```
+
+# Sensibilidad con MLR
+
+```{r sensibilidad}
+X_afc_num <- X_afc |> mutate(across(everything(),as.numeric))
+ajuste_mlr <- lavaan::cfa(modelo_final$sintaxis,data=X_afc_num,estimator="MLR",std.lv=TRUE,missing="fiml")
+comparar_estimadores <- rbind(
+  WLSMV=fitMeasures(ajuste_final,c("cfi.robust","tli.robust","rmsea.robust","srmr")),
+  MLR=fitMeasures(ajuste_mlr,c("cfi.robust","tli.robust","rmsea.robust","srmr")))
+write.csv(comparar_estimadores,"resultados/35_sensibilidad_WLSMV_MLR.csv")
+knitr::kable(comparar_estimadores,digits=3)
+```
+
+# Conclusión automatizada
+
+El modelo seleccionado es `r mejor_nombre`, elegido únicamente entre soluciones confirmatorias admisibles. La estructura final contiene `r solucion_final$k` factores y `r length(solucion_final$items)` indicadores. Los índices robustos fueron CFI = `r round(modelo_final$indices['cfi.robust'],3)`, TLI = `r round(modelo_final$indices['tli.robust'],3)`, RMSEA = `r round(modelo_final$indices['rmsea.robust'],3)` y SRMR = `r round(modelo_final$indices['srmr'],3)`. La interpretación debe considerar conjuntamente estos índices, la fiabilidad, la validez convergente, HTMT, la parsimonia y la cobertura conceptual de cada factor.
+
+# Limitaciones
+
+La muestra es no probabilística y procede de una encuesta aplicada en un contexto específico. La eliminación por casos completos excluye registros con al menos un dato ausente. La selección entre estructuras depende de los criterios declarados y requiere validación externa en otra muestra antes de generalizar resultados o utilizar puntuaciones individuales para decisiones de alto impacto.

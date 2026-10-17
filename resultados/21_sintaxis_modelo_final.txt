@@ -1,0 +1,4 @@
+F1 =~ Biology + Chemistry + Medicine
+F2 =~ Art.exhibitions + Writing + Theatre + Reading + Musical.instruments
+F3 =~ PC + Science.and.technology + Internet + Cars
+F4 =~ l4*Shopping + l4*Celebrities
