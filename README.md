@@ -21,9 +21,9 @@ El proyecto incorpora:
 
 ## Estructura
 
-- `Informe_Unidad2_APA7_FINAL.pdf`: informe final.
-- `Informe_Unidad2_APA7_FINAL.docx`: versión editable.
-- `Analisis_Factorial_Unidad2_FINAL.Rmd`: código reproducible.
+- `Informe_Unidad2.pdf`: informe final.
+- `Informe_Unidad2.docx`: versión editable.
+- `Analisis_Factorial_Unidad2.Rmd`: código reproducible.
 - `datos/`: datos y diccionario de variables.
 - `resultados/`: tablas y salidas del análisis.
 - `figuras/`: visualizaciones del informe.
